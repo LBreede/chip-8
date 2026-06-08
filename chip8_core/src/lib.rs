@@ -340,7 +340,7 @@ impl Emu {
                 let x = digit2 as usize;
                 let vx = self.v_reg[x] as f32;
                 let hundreds = (vx / 100.0).floor() as u8;
-                let tens = (vx / 10.0).floor() as u8;
+                let tens = ((vx / 10.0) % 10.0).floor() as u8;
                 let ones = (vx % 10.0) as u8;
                 self.ram[self.i_reg as usize] = hundreds;
                 self.ram[(self.i_reg + 1) as usize] = tens;
