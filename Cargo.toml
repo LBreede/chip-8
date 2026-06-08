@@ -1,2 +1,4 @@
 [workspace]
+resolver = "3"
+
 members = ["chip8_core", "desktop"]
