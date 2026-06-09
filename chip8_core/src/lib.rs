@@ -92,23 +92,6 @@ impl Emu {
         new_emu
     }
 
-    fn push(&mut self, val: u16) -> EmuResult {
-        if self.sp as usize >= STACK_SIZE {
-            return Err(EmuError::StackOverflow);
-        }
-        self.stack[self.sp as usize] = val;
-        self.sp += 1;
-        Ok(())
-    }
-
-    fn pop(&mut self) -> EmuResult<u16> {
-        if self.sp == 0 {
-            return Err(EmuError::StackUnderflow);
-        }
-        self.sp -= 1;
-        Ok(self.stack[self.sp as usize])
-    }
-
     pub fn reset(&mut self) {
         self.pc = START_ADDR;
         self.ram = [0; RAM_SIZE];
@@ -124,8 +107,35 @@ impl Emu {
     }
 
     pub fn tick(&mut self) -> EmuResult {
-        let op = self.fetch();
-        self.execute(op?)
+        let op = self.fetch()?;
+        self.execute(op)
+    }
+
+    pub fn tick_timers(&mut self) {
+        if self.dt > 0 {
+            self.dt -= 1;
+        }
+        if self.st > 0 {
+            if self.st == 1 {
+                // BEEP
+            }
+            self.st -= 1;
+        }
+    }
+
+    pub fn get_display(&self) -> &[bool] {
+        &self.screen
+    }
+
+    pub fn keypress(&mut self, idx: usize, pressed: bool) {
+        self.keys[idx] = pressed;
+    }
+
+    pub fn load(&mut self, data: &[u8]) {
+        let start = START_ADDR as usize;
+        let end = (START_ADDR as usize) + data.len();
+        assert!(end <= RAM_SIZE);
+        self.ram[start..end].copy_from_slice(data);
     }
 
     fn fetch(&mut self) -> EmuResult<u16> {
@@ -141,49 +151,49 @@ impl Emu {
     }
 
     fn execute(&mut self, op: u16) -> EmuResult {
-        let kind = (op & 0xF000) >> 12;
+        let opcode_class = (op & 0xF000) >> 12;
         let x = ((op & 0x0F00) >> 8) as usize;
         let y = ((op & 0x00F0) >> 4) as usize;
         let n = op & 0x000F;
         let nn = (op & 0xFF) as u8;
         let nnn = op & 0xFFF;
 
-        match (kind, x, y, n) {
-            (0, 0, 0, 0) => (),                                             // NOP
-            (0, 0, 0xE, 0) => self.op_cls(),                                // CLS
-            (0, 0, 0xE, 0xE) => self.op_ret()?,                             // RET
-            (1, _, _, _) => self.op_jmp(nnn),                               // JMP NNN
-            (2, _, _, _) => self.op_call(nnn)?,                             // CALL NNN
-            (3, _, _, _) => self.op_se_vx_nn(x, nn),                        // SKIP VX == NN
-            (4, _, _, _) => self.op_sne_vx_nn(x, nn),                       // SKIP VX != NN
-            (5, _, _, 0) => self.op_se_vx_vy(x, y),                         // SKIP VX == VY
-            (6, _, _, _) => self.v_reg[x] = nn,                             // VX = NN
-            (7, _, _, _) => self.v_reg[x] = self.v_reg[x].wrapping_add(nn), // VX += NN
-            (8, _, _, 0) => self.v_reg[x] = self.v_reg[y],                  // VX = VY
-            (8, _, _, 1) => self.op_or_vx_vy(x, y),                         // VX |= VY
-            (8, _, _, 2) => self.op_and_vx_vy(x, y),                        // VX &= VY
-            (8, _, _, 3) => self.op_xor_vx_vy(x, y),                        // VX ^= VY
-            (8, _, _, 4) => self.op_add_vx_vy(x, y),                        // VX += VY
-            (8, _, _, 5) => self.op_sub_vx_vy(x, y),                        // VX -= VY
-            (8, _, _, 6) => self.op_shr_vx(x),                              // VX >>= 1
-            (8, _, _, 7) => self.op_subn_vx_vy(x, y),                       // VX = VY - VX
-            (8, _, _, 0xE) => self.op_shl_vx(x),                            // VX <<= 1
-            (9, _, _, 0) => self.op_sne_vx_vy(x, y),                        // SKIP VX != VY
-            (0xA, _, _, _) => self.i_reg = nnn,                             // I = NNN
-            (0xB, _, _, _) => self.pc = (self.v_reg[0] as u16) + nnn,       // JMP V0 + NNN
-            (0xC, _, _, _) => self.op_rnd_vx_nn(x, nn),                     // VX = rand() & NN
-            (0xD, _, _, _) => self.op_draw(x, y, n)?,                       // DRAW
-            (0xE, _, 9, 0xE) => self.op_skp_vx(x)?,                         // SKIP KEY PRESS
-            (0xE, _, 0xA, 1) => self.op_sknp_vx(x)?,                        // SKIP KEY RELEASE
-            (0xF, _, 0, 7) => self.v_reg[x] = self.dt,                      // VX = DT
-            (0xF, _, 0, 0xA) => self.op_wait_key(x),                        // WAIT KEY
-            (0xF, _, 1, 5) => self.dt = self.v_reg[x],                      // DT = VX
-            (0xF, _, 1, 8) => self.st = self.v_reg[x],                      // ST = VX
-            (0xF, _, 1, 0xE) => self.op_add_i_vx(x),                        // I += VX
-            (0xF, _, 2, 9) => self.op_ld_font_vx(x),                        // I = FONT
-            (0xF, _, 3, 3) => self.op_ld_bcd_vx(x)?,                        // BCD
-            (0xF, _, 5, 5) => self.op_ld_i_vx(x)?,                          // DUMP V0 - VX
-            (0xF, _, 6, 5) => self.op_ld_vx_i(x)?,                          // READ V0 - VX
+        match (opcode_class, x, y, n) {
+            (0, 0, 0, 0) => self.op_nop()?,              // NOP
+            (0, 0, 0xE, 0) => self.op_cls()?,            // CLS
+            (0, 0, 0xE, 0xE) => self.op_ret()?,          // RET
+            (1, _, _, _) => self.op_jmp(nnn)?,           // JMP NNN
+            (2, _, _, _) => self.op_call(nnn)?,          // CALL NNN
+            (3, _, _, _) => self.op_se_vx_nn(x, nn)?,    // SKIP VX == NN
+            (4, _, _, _) => self.op_sne_vx_nn(x, nn)?,   // SKIP VX != NN
+            (5, _, _, 0) => self.op_se_vx_vy(x, y)?,     // SKIP VX == VY
+            (6, _, _, _) => self.op_ld_vx_nn(x, nn)?,    // VX = NN
+            (7, _, _, _) => self.op_add_vx_nn(x, nn)?,   // VX += NN
+            (8, _, _, 0) => self.op_ld_vx_vy(x, y)?,     // VX = VY
+            (8, _, _, 1) => self.op_or_vx_vy(x, y)?,     // VX |= VY
+            (8, _, _, 2) => self.op_and_vx_vy(x, y)?,    // VX &= VY
+            (8, _, _, 3) => self.op_xor_vx_vy(x, y)?,    // VX ^= VY
+            (8, _, _, 4) => self.op_add_vx_vy(x, y)?,    // VX += VY
+            (8, _, _, 5) => self.op_sub_vx_vy(x, y)?,    // VX -= VY
+            (8, _, _, 6) => self.op_shr_vx(x)?,          // VX >>= 1
+            (8, _, _, 7) => self.op_subn_vx_vy(x, y)?,   // VX = VY - VX
+            (8, _, _, 0xE) => self.op_shl_vx(x)?,        // VX <<= 1
+            (9, _, _, 0) => self.op_sne_vx_vy(x, y)?,    // SKIP VX != VY
+            (0xA, _, _, _) => self.op_ld_i_nnn(nnn)?,    // I = NNN
+            (0xB, _, _, _) => self.op_jmp_v0_nnn(nnn)?,  // JMP V0 + NNN
+            (0xC, _, _, _) => self.op_rnd_vx_nn(x, nn)?, // VX = rand() & NN
+            (0xD, _, _, _) => self.op_draw(x, y, n)?,    // DRAW
+            (0xE, _, 9, 0xE) => self.op_skp_vx(x)?,      // SKIP KEY PRESS
+            (0xE, _, 0xA, 1) => self.op_sknp_vx(x)?,     // SKIP KEY RELEASE
+            (0xF, _, 0, 7) => self.op_ld_vx_dt(x)?,      // VX = DT
+            (0xF, _, 0, 0xA) => self.op_wait_key(x)?,    // WAIT KEY
+            (0xF, _, 1, 5) => self.op_ld_dt_vx(x)?,      // DT = VX
+            (0xF, _, 1, 8) => self.op_ld_st_vx(x)?,      // ST = VX
+            (0xF, _, 1, 0xE) => self.op_add_i_vx(x)?,    // I += VX
+            (0xF, _, 2, 9) => self.op_ld_font_vx(x)?,    // I = FONT
+            (0xF, _, 3, 3) => self.op_ld_bcd_vx(x)?,     // BCD
+            (0xF, _, 5, 5) => self.op_ld_i_vx(x)?,       // DUMP V0 - VX
+            (0xF, _, 6, 5) => self.op_ld_vx_i(x)?,       // READ V0 - VX
             _ => return Err(EmuError::UnknownOpcode { opcode: op }),
         }
 
@@ -200,8 +210,32 @@ impl Emu {
         Ok(addr..end)
     }
 
-    fn op_cls(&mut self) {
+    fn push(&mut self, val: u16) -> EmuResult {
+        if self.sp as usize >= STACK_SIZE {
+            return Err(EmuError::StackOverflow);
+        }
+        self.stack[self.sp as usize] = val;
+        self.sp += 1;
+        Ok(())
+    }
+
+    fn pop(&mut self) -> EmuResult<u16> {
+        if self.sp == 0 {
+            return Err(EmuError::StackUnderflow);
+        }
+        self.sp -= 1;
+        Ok(self.stack[self.sp as usize])
+    }
+}
+
+impl Emu {
+    fn op_nop(&mut self) -> EmuResult {
+        Ok(())
+    }
+
+    fn op_cls(&mut self) -> EmuResult {
         self.screen = [false; SCREEN_WIDTH * SCREEN_HEIGHT];
+        Ok(())
     }
 
     fn op_ret(&mut self) -> EmuResult {
@@ -210,8 +244,9 @@ impl Emu {
         Ok(())
     }
 
-    fn op_jmp(&mut self, nnn: u16) {
+    fn op_jmp(&mut self, nnn: u16) -> EmuResult {
         self.pc = nnn;
+        Ok(())
     }
 
     fn op_call(&mut self, nnn: u16) -> EmuResult {
@@ -220,82 +255,122 @@ impl Emu {
         Ok(())
     }
 
-    fn op_se_vx_nn(&mut self, x: usize, nn: u8) {
+    fn op_se_vx_nn(&mut self, x: usize, nn: u8) -> EmuResult {
         if self.v_reg[x] == nn {
             self.pc += 2;
         }
+        Ok(())
     }
 
-    fn op_sne_vx_nn(&mut self, x: usize, nn: u8) {
+    fn op_sne_vx_nn(&mut self, x: usize, nn: u8) -> EmuResult {
         if self.v_reg[x] != nn {
             self.pc += 2;
         }
+        Ok(())
     }
 
-    fn op_se_vx_vy(&mut self, x: usize, y: usize) {
+    fn op_se_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
         if self.v_reg[x] == self.v_reg[y] {
             self.pc += 2;
         }
+        Ok(())
     }
 
-    fn op_or_vx_vy(&mut self, x: usize, y: usize) {
+    fn op_ld_vx_nn(&mut self, x: usize, nn: u8) -> EmuResult {
+        self.v_reg[x] = nn;
+        Ok(())
+    }
+
+    fn op_add_vx_nn(&mut self, x: usize, nn: u8) -> EmuResult {
+        self.v_reg[x] = self.v_reg[x].wrapping_add(nn);
+        Ok(())
+    }
+
+    fn op_ld_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
+        self.v_reg[x] = self.v_reg[y];
+        Ok(())
+    }
+
+    fn op_or_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
         self.v_reg[x] |= self.v_reg[y];
-    }
-    fn op_and_vx_vy(&mut self, x: usize, y: usize) {
-        self.v_reg[x] &= self.v_reg[y];
-    }
-    fn op_xor_vx_vy(&mut self, x: usize, y: usize) {
-        self.v_reg[x] ^= self.v_reg[y];
+        Ok(())
     }
 
-    fn op_add_vx_vy(&mut self, x: usize, y: usize) {
+    fn op_and_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
+        self.v_reg[x] &= self.v_reg[y];
+        Ok(())
+    }
+
+    fn op_xor_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
+        self.v_reg[x] ^= self.v_reg[y];
+        Ok(())
+    }
+
+    fn op_add_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
         let (new_vx, carry) = self.v_reg[x].overflowing_add(self.v_reg[y]);
         let new_vf = if carry { 1 } else { 0 };
         self.v_reg[x] = new_vx;
         self.v_reg[0xF] = new_vf;
+        Ok(())
     }
 
-    fn op_sub_vx_vy(&mut self, x: usize, y: usize) {
+    fn op_sub_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
         let (new_vx, borrow) = self.v_reg[x].overflowing_sub(self.v_reg[y]);
         let new_vf = if borrow { 0 } else { 1 };
         self.v_reg[x] = new_vx;
         self.v_reg[0xF] = new_vf;
+        Ok(())
     }
 
-    fn op_shr_vx(&mut self, x: usize) {
+    fn op_shr_vx(&mut self, x: usize) -> EmuResult {
         let lsb = self.v_reg[x] & 1;
         self.v_reg[x] >>= 1;
         self.v_reg[0xF] = lsb;
+        Ok(())
     }
 
-    fn op_subn_vx_vy(&mut self, x: usize, y: usize) {
+    fn op_subn_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
         let (new_vx, borrow) = self.v_reg[y].overflowing_sub(self.v_reg[x]);
         let new_vf = if borrow { 0 } else { 1 };
         self.v_reg[x] = new_vx;
         self.v_reg[0xF] = new_vf;
+        Ok(())
     }
 
-    fn op_shl_vx(&mut self, x: usize) {
+    fn op_shl_vx(&mut self, x: usize) -> EmuResult {
         let msb = (self.v_reg[x] >> 7) & 1;
         self.v_reg[x] <<= 1;
         self.v_reg[0xF] = msb;
+        Ok(())
     }
 
-    fn op_sne_vx_vy(&mut self, x: usize, y: usize) {
+    fn op_sne_vx_vy(&mut self, x: usize, y: usize) -> EmuResult {
         if self.v_reg[x] != self.v_reg[y] {
             self.pc += 2;
         }
+        Ok(())
     }
 
-    fn op_rnd_vx_nn(&mut self, x: usize, nn: u8) {
+    fn op_ld_i_nnn(&mut self, nnn: u16) -> EmuResult {
+        self.i_reg = nnn;
+        Ok(())
+    }
+
+    fn op_jmp_v0_nnn(&mut self, nnn: u16) -> EmuResult {
+        self.pc = (self.v_reg[0] as u16) + nnn;
+        Ok(())
+    }
+
+    fn op_rnd_vx_nn(&mut self, x: usize, nn: u8) -> EmuResult {
         let rng: u8 = random();
         self.v_reg[x] = rng & nn;
+        Ok(())
     }
 
     fn op_draw(&mut self, x: usize, y: usize, n: u16) -> EmuResult {
         let x_coord = self.v_reg[x] as u16;
         let y_coord = self.v_reg[y] as u16;
-        let num_rows = n as u16;
+        let num_rows = n;
         self.checked_ram_range(self.i_reg as usize, num_rows as usize)?;
         let mut flipped = false;
         for y_line in 0..num_rows {
@@ -343,7 +418,12 @@ impl Emu {
         Ok(())
     }
 
-    fn op_wait_key(&mut self, x: usize) {
+    fn op_ld_vx_dt(&mut self, x: usize) -> EmuResult {
+        self.v_reg[x] = self.dt;
+        Ok(())
+    }
+
+    fn op_wait_key(&mut self, x: usize) -> EmuResult {
         let mut pressed = false;
         for i in 0..self.keys.len() {
             if self.keys[i] {
@@ -355,16 +435,29 @@ impl Emu {
         if !pressed {
             self.pc -= 2;
         }
+        Ok(())
     }
 
-    fn op_add_i_vx(&mut self, x: usize) {
+    fn op_ld_dt_vx(&mut self, x: usize) -> EmuResult {
+        self.dt = self.v_reg[x];
+        Ok(())
+    }
+
+    fn op_ld_st_vx(&mut self, x: usize) -> EmuResult {
+        self.st = self.v_reg[x];
+        Ok(())
+    }
+
+    fn op_add_i_vx(&mut self, x: usize) -> EmuResult {
         let vx = self.v_reg[x] as u16;
         self.i_reg = self.i_reg.wrapping_add(vx);
+        Ok(())
     }
 
-    fn op_ld_font_vx(&mut self, x: usize) {
+    fn op_ld_font_vx(&mut self, x: usize) -> EmuResult {
         let c = self.v_reg[x] as u16;
         self.i_reg = c * 5;
+        Ok(())
     }
 
     fn op_ld_bcd_vx(&mut self, x: usize) -> EmuResult {
@@ -393,33 +486,6 @@ impl Emu {
             self.v_reg[idx] = self.ram[i + idx];
         }
         Ok(())
-    }
-
-    pub fn tick_timers(&mut self) {
-        if self.dt > 0 {
-            self.dt -= 1;
-        }
-        if self.st > 0 {
-            if self.st == 1 {
-                // BEEP
-            }
-            self.st -= 1;
-        }
-    }
-
-    pub fn get_display(&self) -> &[bool] {
-        &self.screen
-    }
-
-    pub fn keypress(&mut self, idx: usize, pressed: bool) {
-        self.keys[idx] = pressed;
-    }
-
-    pub fn load(&mut self, data: &[u8]) {
-        let start = START_ADDR as usize;
-        let end = (START_ADDR as usize) + data.len();
-        assert!(end <= RAM_SIZE);
-        self.ram[start..end].copy_from_slice(data);
     }
 }
 
