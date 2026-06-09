@@ -494,3 +494,358 @@ impl Default for Emu {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_opcode(emu: &mut Emu, addr: u16, opcode: u16) {
+        let addr = addr as usize;
+        emu.ram[addr] = (opcode >> 8) as u8;
+        emu.ram[addr + 1] = opcode as u8;
+    }
+
+    fn run_opcode(emu: &mut Emu, opcode: u16) -> EmuResult {
+        emu.pc = START_ADDR;
+        write_opcode(emu, START_ADDR, opcode);
+        emu.tick()
+    }
+
+    #[test]
+    fn new_initializes_core_state() {
+        let emu = Emu::new();
+
+        assert_eq!(emu.pc, START_ADDR);
+        assert_eq!(&emu.ram[..FONTSET_SIZE], FONTSET);
+        assert!(emu.screen.iter().all(|pixel| !pixel));
+        assert_eq!(emu.v_reg, [0; NUM_REGS]);
+        assert_eq!(emu.i_reg, 0);
+        assert_eq!(emu.sp, 0);
+        assert_eq!(emu.stack, [0; STACK_SIZE]);
+        assert_eq!(emu.keys, [false; NUM_KEYS]);
+        assert_eq!(emu.dt, 0);
+        assert_eq!(emu.st, 0);
+    }
+
+    #[test]
+    fn reset_restores_initial_state() {
+        let mut emu = Emu::new();
+        emu.pc = 0x300;
+        emu.ram[START_ADDR as usize] = 0xAA;
+        emu.screen[0] = true;
+        emu.v_reg[1] = 0xBB;
+        emu.i_reg = 0x444;
+        emu.sp = 1;
+        emu.stack[0] = 0x222;
+        emu.keys[0] = true;
+        emu.dt = 12;
+        emu.st = 34;
+
+        emu.reset();
+
+        assert_eq!(emu.pc, START_ADDR);
+        assert_eq!(&emu.ram[..FONTSET_SIZE], FONTSET);
+        assert_eq!(emu.ram[START_ADDR as usize], 0);
+        assert!(emu.screen.iter().all(|pixel| !pixel));
+        assert_eq!(emu.v_reg, [0; NUM_REGS]);
+        assert_eq!(emu.i_reg, 0);
+        assert_eq!(emu.sp, 0);
+        assert_eq!(emu.stack, [0; STACK_SIZE]);
+        assert_eq!(emu.keys, [false; NUM_KEYS]);
+        assert_eq!(emu.dt, 0);
+        assert_eq!(emu.st, 0);
+    }
+
+    #[test]
+    fn load_writes_rom_at_start_address() {
+        let mut emu = Emu::new();
+        let rom = [0x12, 0x34, 0xAB, 0xCD];
+
+        emu.load(&rom);
+
+        let start = START_ADDR as usize;
+        assert_eq!(&emu.ram[start..start + rom.len()], rom);
+    }
+
+    #[test]
+    fn flow_opcodes_update_pc_and_stack() {
+        let mut emu = Emu::new();
+        write_opcode(&mut emu, START_ADDR, 0x2300);
+        write_opcode(&mut emu, 0x300, 0x00EE);
+
+        emu.tick().unwrap();
+        assert_eq!(emu.pc, 0x300);
+        assert_eq!(emu.sp, 1);
+        assert_eq!(emu.stack[0], START_ADDR + 2);
+
+        emu.tick().unwrap();
+        assert_eq!(emu.pc, START_ADDR + 2);
+        assert_eq!(emu.sp, 0);
+
+        run_opcode(&mut emu, 0x1456).unwrap();
+        assert_eq!(emu.pc, 0x456);
+    }
+
+    #[test]
+    fn skip_opcodes_advance_pc_when_condition_matches() {
+        let mut emu = Emu::new();
+
+        emu.v_reg[1] = 0x42;
+        run_opcode(&mut emu, 0x3142).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 4);
+
+        run_opcode(&mut emu, 0x3143).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 2);
+
+        run_opcode(&mut emu, 0x4143).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 4);
+
+        emu.v_reg[2] = 0x42;
+        run_opcode(&mut emu, 0x5120).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 4);
+
+        emu.v_reg[2] = 0x99;
+        run_opcode(&mut emu, 0x9120).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 4);
+    }
+
+    #[test]
+    fn register_and_arithmetic_opcodes_update_values_and_flags() {
+        let mut emu = Emu::new();
+
+        emu.execute(0x61FE).unwrap();
+        assert_eq!(emu.v_reg[1], 0xFE);
+
+        emu.execute(0x7105).unwrap();
+        assert_eq!(emu.v_reg[1], 0x03);
+
+        emu.v_reg[1] = 0b1010_0001;
+        emu.v_reg[2] = 0b1100_0011;
+        emu.execute(0x8120).unwrap();
+        assert_eq!(emu.v_reg[1], 0b1100_0011);
+        emu.execute(0x8121).unwrap();
+        assert_eq!(emu.v_reg[1], 0b1100_0011);
+        emu.execute(0x8122).unwrap();
+        assert_eq!(emu.v_reg[1], 0b1100_0011);
+        emu.execute(0x8123).unwrap();
+        assert_eq!(emu.v_reg[1], 0);
+
+        emu.v_reg[1] = 250;
+        emu.v_reg[2] = 10;
+        emu.execute(0x8124).unwrap();
+        assert_eq!(emu.v_reg[1], 4);
+        assert_eq!(emu.v_reg[0xF], 1);
+
+        emu.v_reg[1] = 10;
+        emu.v_reg[2] = 3;
+        emu.execute(0x8125).unwrap();
+        assert_eq!(emu.v_reg[1], 7);
+        assert_eq!(emu.v_reg[0xF], 1);
+
+        emu.v_reg[1] = 3;
+        emu.v_reg[2] = 10;
+        emu.execute(0x8125).unwrap();
+        assert_eq!(emu.v_reg[1], 249);
+        assert_eq!(emu.v_reg[0xF], 0);
+
+        emu.v_reg[1] = 3;
+        emu.execute(0x8106).unwrap();
+        assert_eq!(emu.v_reg[1], 1);
+        assert_eq!(emu.v_reg[0xF], 1);
+
+        emu.v_reg[1] = 3;
+        emu.v_reg[2] = 10;
+        emu.execute(0x8127).unwrap();
+        assert_eq!(emu.v_reg[1], 7);
+        assert_eq!(emu.v_reg[0xF], 1);
+
+        emu.v_reg[1] = 0b1000_0001;
+        emu.execute(0x810E).unwrap();
+        assert_eq!(emu.v_reg[1], 0b0000_0010);
+        assert_eq!(emu.v_reg[0xF], 1);
+    }
+
+    #[test]
+    fn index_and_memory_opcodes_update_i_and_ram() {
+        let mut emu = Emu::new();
+
+        emu.execute(0xA300).unwrap();
+        assert_eq!(emu.i_reg, 0x300);
+
+        emu.v_reg[0] = 0x10;
+        emu.execute(0xB300).unwrap();
+        assert_eq!(emu.pc, 0x310);
+
+        emu.i_reg = 0x300;
+        emu.v_reg[1] = 0x22;
+        emu.execute(0xF11E).unwrap();
+        assert_eq!(emu.i_reg, 0x322);
+
+        emu.v_reg[2] = 0x0A;
+        emu.execute(0xF229).unwrap();
+        assert_eq!(emu.i_reg, 50);
+
+        emu.i_reg = 0x350;
+        emu.v_reg[3] = 234;
+        emu.execute(0xF333).unwrap();
+        assert_eq!(&emu.ram[0x350..0x353], [2, 3, 4]);
+
+        emu.i_reg = 0x360;
+        emu.v_reg[0] = 1;
+        emu.v_reg[1] = 2;
+        emu.v_reg[2] = 3;
+        emu.execute(0xF255).unwrap();
+        assert_eq!(&emu.ram[0x360..0x363], [1, 2, 3]);
+
+        emu.v_reg[0] = 0;
+        emu.v_reg[1] = 0;
+        emu.v_reg[2] = 0;
+        emu.execute(0xF265).unwrap();
+        assert_eq!(emu.v_reg[0], 1);
+        assert_eq!(emu.v_reg[1], 2);
+        assert_eq!(emu.v_reg[2], 3);
+    }
+
+    #[test]
+    fn draw_sets_pixels_wraps_and_reports_collisions() {
+        let mut emu = Emu::new();
+        emu.i_reg = 0x300;
+        emu.ram[0x300] = 0b1100_0000;
+        emu.v_reg[1] = (SCREEN_WIDTH - 1) as u8;
+        emu.v_reg[2] = (SCREEN_HEIGHT - 1) as u8;
+
+        emu.execute(0xD121).unwrap();
+
+        let bottom_right = (SCREEN_WIDTH - 1) + SCREEN_WIDTH * (SCREEN_HEIGHT - 1);
+        let bottom_left = SCREEN_WIDTH * (SCREEN_HEIGHT - 1);
+        assert!(emu.screen[bottom_right]);
+        assert!(emu.screen[bottom_left]);
+        assert_eq!(emu.v_reg[0xF], 0);
+
+        emu.execute(0xD121).unwrap();
+        assert!(!emu.screen[bottom_right]);
+        assert!(!emu.screen[bottom_left]);
+        assert_eq!(emu.v_reg[0xF], 1);
+    }
+
+    #[test]
+    fn key_opcodes_skip_based_on_key_state() {
+        let mut emu = Emu::new();
+        emu.v_reg[1] = 0xA;
+
+        run_opcode(&mut emu, 0xE19E).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 2);
+
+        emu.keypress(0xA, true);
+        run_opcode(&mut emu, 0xE19E).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 4);
+
+        run_opcode(&mut emu, 0xE1A1).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 2);
+
+        emu.keypress(0xA, false);
+        run_opcode(&mut emu, 0xE1A1).unwrap();
+        assert_eq!(emu.pc, START_ADDR + 4);
+    }
+
+    #[test]
+    fn wait_key_repeats_until_a_key_is_pressed() {
+        let mut emu = Emu::new();
+
+        run_opcode(&mut emu, 0xF10A).unwrap();
+        assert_eq!(emu.pc, START_ADDR);
+
+        emu.keypress(0xC, true);
+        run_opcode(&mut emu, 0xF10A).unwrap();
+        assert_eq!(emu.v_reg[1], 0xC);
+        assert_eq!(emu.pc, START_ADDR + 2);
+    }
+
+    #[test]
+    fn timer_opcodes_read_write_and_tick_timers() {
+        let mut emu = Emu::new();
+        emu.v_reg[1] = 5;
+        emu.v_reg[2] = 7;
+
+        emu.execute(0xF115).unwrap();
+        emu.execute(0xF218).unwrap();
+        assert_eq!(emu.dt, 5);
+        assert_eq!(emu.st, 7);
+
+        emu.execute(0xF307).unwrap();
+        assert_eq!(emu.v_reg[3], 5);
+
+        emu.tick_timers();
+        assert_eq!(emu.dt, 4);
+        assert_eq!(emu.st, 6);
+    }
+
+    #[test]
+    fn rnd_applies_mask() {
+        let mut emu = Emu::new();
+
+        emu.execute(0xC10F).unwrap();
+
+        assert_eq!(emu.v_reg[1] & 0xF0, 0);
+    }
+
+    #[test]
+    fn tick_returns_error_for_unknown_opcode() {
+        let mut emu = Emu::new();
+
+        let err = run_opcode(&mut emu, 0xFFFF).unwrap_err();
+
+        assert_eq!(err, EmuError::UnknownOpcode { opcode: 0xFFFF });
+    }
+
+    #[test]
+    fn stack_errors_are_reported() {
+        let mut emu = Emu::new();
+
+        assert_eq!(emu.execute(0x00EE), Err(EmuError::StackUnderflow));
+
+        for _ in 0..STACK_SIZE {
+            emu.execute(0x2200).unwrap();
+        }
+        assert_eq!(emu.execute(0x2200), Err(EmuError::StackOverflow));
+    }
+
+    #[test]
+    fn invalid_key_register_value_is_reported() {
+        let mut emu = Emu::new();
+        emu.v_reg[1] = 0x10;
+
+        assert_eq!(emu.execute(0xE19E), Err(EmuError::InvalidKey { key: 0x10 }));
+        assert_eq!(emu.execute(0xE1A1), Err(EmuError::InvalidKey { key: 0x10 }));
+    }
+
+    #[test]
+    fn out_of_bounds_pc_and_i_are_reported() {
+        let mut emu = Emu::new();
+        emu.pc = (RAM_SIZE - 1) as u16;
+        assert_eq!(
+            emu.tick(),
+            Err(EmuError::PcOutOfBounds {
+                pc: (RAM_SIZE - 1) as u16
+            })
+        );
+
+        emu.i_reg = (RAM_SIZE - 1) as u16;
+        assert_eq!(
+            emu.execute(0xF133),
+            Err(EmuError::MemoryOutOfBounds {
+                addr: RAM_SIZE - 1,
+                len: 3
+            })
+        );
+
+        emu.i_reg = (RAM_SIZE - 1) as u16;
+        assert_eq!(
+            emu.execute(0xD002),
+            Err(EmuError::MemoryOutOfBounds {
+                addr: RAM_SIZE - 1,
+                len: 2
+            })
+        );
+    }
+}
