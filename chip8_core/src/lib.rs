@@ -362,8 +362,8 @@ impl Emu {
     }
 
     fn op_rnd_vx_nn(&mut self, x: usize, nn: u8) -> EmuResult {
-        let rng: u8 = random();
-        self.v_reg[x] = rng & nn;
+        let random_byte: u8 = random();
+        self.v_reg[x] = random_byte & nn;
         Ok(())
     }
 
