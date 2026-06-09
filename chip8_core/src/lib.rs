@@ -292,6 +292,7 @@ impl Emu {
     pub fn load(&mut self, data: &[u8]) {
         let start = START_ADDR as usize;
         let end = (START_ADDR as usize) + data.len();
+        assert!(end <= RAM_SIZE);
         self.ram[start..end].copy_from_slice(data);
     }
 }
