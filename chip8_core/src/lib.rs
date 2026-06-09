@@ -1,4 +1,5 @@
 use rand::random;
+use std::fmt;
 
 pub const FONTSET_SIZE: usize = 80;
 const FONTSET: [u8; FONTSET_SIZE] = [
@@ -28,6 +29,38 @@ const STACK_SIZE: usize = 16;
 const NUM_KEYS: usize = 16;
 
 const START_ADDR: u16 = 0x200;
+
+pub type EmuResult<T = ()> = Result<T, EmuError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmuError {
+    PcOutOfBounds { pc: u16 },
+    MemoryOutOfBounds { addr: usize, len: usize },
+    StackOverflow,
+    StackUnderflow,
+    InvalidKey { key: u8 },
+    UnknownOpcode { opcode: u16 },
+}
+
+impl fmt::Display for EmuError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PcOutOfBounds { pc } => write!(f, "program counter out of bounds: {pc:#05x}"),
+            Self::MemoryOutOfBounds { addr, len } => {
+                write!(
+                    f,
+                    "memory access out of bounds: addr={addr:#05x}, len={len}"
+                )
+            }
+            Self::StackOverflow => write!(f, "stack overflow"),
+            Self::StackUnderflow => write!(f, "stack underflow"),
+            Self::InvalidKey { key } => write!(f, "invalid key register value: {key:#04x}"),
+            Self::UnknownOpcode { opcode } => write!(f, "unknown opcode: {opcode:04x}"),
+        }
+    }
+}
+
+impl std::error::Error for EmuError {}
 
 pub struct Emu {
     pc: u16,
@@ -59,14 +92,21 @@ impl Emu {
         new_emu
     }
 
-    fn push(&mut self, val: u16) {
+    fn push(&mut self, val: u16) -> EmuResult {
+        if self.sp as usize >= STACK_SIZE {
+            return Err(EmuError::StackOverflow);
+        }
         self.stack[self.sp as usize] = val;
         self.sp += 1;
+        Ok(())
     }
 
-    fn pop(&mut self) -> u16 {
+    fn pop(&mut self) -> EmuResult<u16> {
+        if self.sp == 0 {
+            return Err(EmuError::StackUnderflow);
+        }
         self.sp -= 1;
-        self.stack[self.sp as usize]
+        Ok(self.stack[self.sp as usize])
     }
 
     pub fn reset(&mut self) {
@@ -83,20 +123,24 @@ impl Emu {
         self.ram[..FONTSET_SIZE].copy_from_slice(&FONTSET);
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> EmuResult {
         let op = self.fetch();
-        self.execute(op);
+        self.execute(op?)
     }
 
-    fn fetch(&mut self) -> u16 {
-        let higher_byte = self.ram[self.pc as usize] as u16;
-        let lower_byte = self.ram[(self.pc + 1) as usize] as u16;
+    fn fetch(&mut self) -> EmuResult<u16> {
+        let pc = self.pc as usize;
+        if pc.checked_add(1).is_none_or(|last| last >= RAM_SIZE) {
+            return Err(EmuError::PcOutOfBounds { pc: self.pc });
+        }
+        let higher_byte = self.ram[pc] as u16;
+        let lower_byte = self.ram[pc + 1] as u16;
         let op = (higher_byte << 8) | lower_byte;
         self.pc += 2;
-        op
+        Ok(op)
     }
 
-    fn execute(&mut self, op: u16) {
+    fn execute(&mut self, op: u16) -> EmuResult {
         let kind = (op & 0xF000) >> 12;
         let x = ((op & 0x0F00) >> 8) as usize;
         let y = ((op & 0x00F0) >> 4) as usize;
@@ -107,9 +151,9 @@ impl Emu {
         match (kind, x, y, n) {
             (0, 0, 0, 0) => (),                                             // NOP
             (0, 0, 0xE, 0) => self.op_cls(),                                // CLS
-            (0, 0, 0xE, 0xE) => self.op_ret(),                              // RET
+            (0, 0, 0xE, 0xE) => self.op_ret()?,                             // RET
             (1, _, _, _) => self.op_jmp(nnn),                               // JMP NNN
-            (2, _, _, _) => self.op_call(nnn),                              // CALL NNN
+            (2, _, _, _) => self.op_call(nnn)?,                             // CALL NNN
             (3, _, _, _) => self.op_se_vx_nn(x, nn),                        // SKIP VX == NN
             (4, _, _, _) => self.op_sne_vx_nn(x, nn),                       // SKIP VX != NN
             (5, _, _, 0) => self.op_se_vx_vy(x, y),                         // SKIP VX == VY
@@ -128,38 +172,52 @@ impl Emu {
             (0xA, _, _, _) => self.i_reg = nnn,                             // I = NNN
             (0xB, _, _, _) => self.pc = (self.v_reg[0] as u16) + nnn,       // JMP V0 + NNN
             (0xC, _, _, _) => self.op_rnd_vx_nn(x, nn),                     // VX = rand() & NN
-            (0xD, _, _, _) => self.op_draw(x, y, n),                        // DRAW
-            (0xE, _, 9, 0xE) => self.op_skp_vx(x),                          // SKIP KEY PRESS
-            (0xE, _, 0xA, 1) => self.op_sknp_vx(x),                         // SKIP KEY RELEASE
+            (0xD, _, _, _) => self.op_draw(x, y, n)?,                       // DRAW
+            (0xE, _, 9, 0xE) => self.op_skp_vx(x)?,                         // SKIP KEY PRESS
+            (0xE, _, 0xA, 1) => self.op_sknp_vx(x)?,                        // SKIP KEY RELEASE
             (0xF, _, 0, 7) => self.v_reg[x] = self.dt,                      // VX = DT
             (0xF, _, 0, 0xA) => self.op_wait_key(x),                        // WAIT KEY
             (0xF, _, 1, 5) => self.dt = self.v_reg[x],                      // DT = VX
             (0xF, _, 1, 8) => self.st = self.v_reg[x],                      // ST = VX
             (0xF, _, 1, 0xE) => self.op_add_i_vx(x),                        // I += VX
             (0xF, _, 2, 9) => self.op_ld_font_vx(x),                        // I = FONT
-            (0xF, _, 3, 3) => self.op_ld_bcd_vx(x),                         // BCD
-            (0xF, _, 5, 5) => self.op_ld_i_vx(x),                           // DUMP V0 - VX
-            (0xF, _, 6, 5) => self.op_ld_vx_i(x),                           // READ V0 - VX
-            _ => panic!("Unknown opcode: {op:04x}"),
+            (0xF, _, 3, 3) => self.op_ld_bcd_vx(x)?,                        // BCD
+            (0xF, _, 5, 5) => self.op_ld_i_vx(x)?,                          // DUMP V0 - VX
+            (0xF, _, 6, 5) => self.op_ld_vx_i(x)?,                          // READ V0 - VX
+            _ => return Err(EmuError::UnknownOpcode { opcode: op }),
         }
+
+        Ok(())
+    }
+
+    fn checked_ram_range(&self, addr: usize, len: usize) -> EmuResult<std::ops::Range<usize>> {
+        let end = addr
+            .checked_add(len)
+            .ok_or(EmuError::MemoryOutOfBounds { addr, len })?;
+        if end > RAM_SIZE {
+            return Err(EmuError::MemoryOutOfBounds { addr, len });
+        }
+        Ok(addr..end)
     }
 
     fn op_cls(&mut self) {
         self.screen = [false; SCREEN_WIDTH * SCREEN_HEIGHT];
     }
 
-    fn op_ret(&mut self) {
-        let ret_addr = self.pop();
+    fn op_ret(&mut self) -> EmuResult {
+        let ret_addr = self.pop()?;
         self.pc = ret_addr;
+        Ok(())
     }
 
     fn op_jmp(&mut self, nnn: u16) {
         self.pc = nnn;
     }
 
-    fn op_call(&mut self, nnn: u16) {
-        self.push(self.pc);
+    fn op_call(&mut self, nnn: u16) -> EmuResult {
+        self.push(self.pc)?;
         self.pc = nnn;
+        Ok(())
     }
 
     fn op_se_vx_nn(&mut self, x: usize, nn: u8) {
@@ -234,10 +292,11 @@ impl Emu {
         self.v_reg[x] = rng & nn;
     }
 
-    fn op_draw(&mut self, x: usize, y: usize, n: u16) {
+    fn op_draw(&mut self, x: usize, y: usize, n: u16) -> EmuResult {
         let x_coord = self.v_reg[x] as u16;
         let y_coord = self.v_reg[y] as u16;
         let num_rows = n as u16;
+        self.checked_ram_range(self.i_reg as usize, num_rows as usize)?;
         let mut flipped = false;
         for y_line in 0..num_rows {
             let addr = self.i_reg + y_line;
@@ -257,22 +316,31 @@ impl Emu {
         } else {
             self.v_reg[0xF] = 0;
         }
+        Ok(())
     }
 
-    fn op_skp_vx(&mut self, x: usize) {
+    fn op_skp_vx(&mut self, x: usize) -> EmuResult {
         let vx = self.v_reg[x];
+        if vx as usize >= NUM_KEYS {
+            return Err(EmuError::InvalidKey { key: vx });
+        }
         let key = self.keys[vx as usize];
         if key {
             self.pc += 2;
         }
+        Ok(())
     }
 
-    fn op_sknp_vx(&mut self, x: usize) {
+    fn op_sknp_vx(&mut self, x: usize) -> EmuResult {
         let vx = self.v_reg[x];
+        if vx as usize >= NUM_KEYS {
+            return Err(EmuError::InvalidKey { key: vx });
+        }
         let key = self.keys[vx as usize];
         if !key {
             self.pc += 2;
         }
+        Ok(())
     }
 
     fn op_wait_key(&mut self, x: usize) {
@@ -299,25 +367,32 @@ impl Emu {
         self.i_reg = c * 5;
     }
 
-    fn op_ld_bcd_vx(&mut self, x: usize) {
+    fn op_ld_bcd_vx(&mut self, x: usize) -> EmuResult {
         let vx = self.v_reg[x];
-        self.ram[self.i_reg as usize] = vx / 100;
-        self.ram[self.i_reg as usize + 1] = (vx % 100) / 10;
-        self.ram[self.i_reg as usize + 2] = vx % 10;
+        let range = self.checked_ram_range(self.i_reg as usize, 3)?;
+        let i = range.start;
+        self.ram[i] = vx / 100;
+        self.ram[i + 1] = (vx % 100) / 10;
+        self.ram[i + 2] = vx % 10;
+        Ok(())
     }
 
-    fn op_ld_i_vx(&mut self, x: usize) {
+    fn op_ld_i_vx(&mut self, x: usize) -> EmuResult {
         let i = self.i_reg as usize;
+        self.checked_ram_range(i, x + 1)?;
         for idx in 0..=x {
             self.ram[i + idx] = self.v_reg[idx];
         }
+        Ok(())
     }
 
-    fn op_ld_vx_i(&mut self, x: usize) {
+    fn op_ld_vx_i(&mut self, x: usize) -> EmuResult {
         let i = self.i_reg as usize;
+        self.checked_ram_range(i, x + 1)?;
         for idx in 0..=x {
             self.v_reg[idx] = self.ram[i + idx];
         }
+        Ok(())
     }
 
     pub fn tick_timers(&mut self) {

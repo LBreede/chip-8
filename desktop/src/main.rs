@@ -131,7 +131,10 @@ fn main() {
         }
 
         while cpu_acc >= cpu_step {
-            chip8.tick();
+            if let Err(err) = chip8.tick() {
+                eprintln!("Emulation error: {err}");
+                break 'gameloop;
+            }
             cpu_acc -= cpu_step;
         }
         while timer_acc >= timer_step {
