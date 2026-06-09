@@ -36,9 +36,11 @@ pub type EmuResult<T = ()> = Result<T, EmuError>;
 pub enum EmuError {
     PcOutOfBounds { pc: u16 },
     MemoryOutOfBounds { addr: usize, len: usize },
+    RomTooLarge { len: usize, max: usize },
     StackOverflow,
     StackUnderflow,
     InvalidKey { key: u8 },
+    InvalidKeyIndex { index: usize },
     UnknownOpcode { opcode: u16 },
 }
 
@@ -52,9 +54,13 @@ impl fmt::Display for EmuError {
                     "memory access out of bounds: addr={addr:#05x}, len={len}"
                 )
             }
+            Self::RomTooLarge { len, max } => {
+                write!(f, "ROM too large: len={len}, max={max}")
+            }
             Self::StackOverflow => write!(f, "stack overflow"),
             Self::StackUnderflow => write!(f, "stack underflow"),
             Self::InvalidKey { key } => write!(f, "invalid key register value: {key:#04x}"),
+            Self::InvalidKeyIndex { index } => write!(f, "invalid key index: {index:#x}"),
             Self::UnknownOpcode { opcode } => write!(f, "unknown opcode: {opcode:04x}"),
         }
     }
@@ -127,15 +133,26 @@ impl Emu {
         &self.screen
     }
 
-    pub fn keypress(&mut self, idx: usize, pressed: bool) {
+    pub fn keypress(&mut self, idx: usize, pressed: bool) -> EmuResult {
+        if idx >= NUM_KEYS {
+            return Err(EmuError::InvalidKeyIndex { index: idx });
+        }
         self.keys[idx] = pressed;
+        Ok(())
     }
 
-    pub fn load(&mut self, data: &[u8]) {
+    pub fn load(&mut self, data: &[u8]) -> EmuResult {
         let start = START_ADDR as usize;
-        let end = (START_ADDR as usize) + data.len();
-        assert!(end <= RAM_SIZE);
+        let max = RAM_SIZE - start;
+        if data.len() > max {
+            return Err(EmuError::RomTooLarge {
+                len: data.len(),
+                max,
+            });
+        }
+        let end = start + data.len();
         self.ram[start..end].copy_from_slice(data);
+        Ok(())
     }
 
     fn fetch(&mut self) -> EmuResult<u16> {
@@ -561,7 +578,7 @@ mod tests {
         let mut emu = Emu::new();
         let rom = [0x12, 0x34, 0xAB, 0xCD];
 
-        emu.load(&rom);
+        emu.load(&rom).unwrap();
 
         let start = START_ADDR as usize;
         assert_eq!(&emu.ram[start..start + rom.len()], rom);
@@ -736,14 +753,14 @@ mod tests {
         run_opcode(&mut emu, 0xE19E).unwrap();
         assert_eq!(emu.pc, START_ADDR + 2);
 
-        emu.keypress(0xA, true);
+        emu.keypress(0xA, true).unwrap();
         run_opcode(&mut emu, 0xE19E).unwrap();
         assert_eq!(emu.pc, START_ADDR + 4);
 
         run_opcode(&mut emu, 0xE1A1).unwrap();
         assert_eq!(emu.pc, START_ADDR + 2);
 
-        emu.keypress(0xA, false);
+        emu.keypress(0xA, false).unwrap();
         run_opcode(&mut emu, 0xE1A1).unwrap();
         assert_eq!(emu.pc, START_ADDR + 4);
     }
@@ -755,7 +772,7 @@ mod tests {
         run_opcode(&mut emu, 0xF10A).unwrap();
         assert_eq!(emu.pc, START_ADDR);
 
-        emu.keypress(0xC, true);
+        emu.keypress(0xC, true).unwrap();
         run_opcode(&mut emu, 0xF10A).unwrap();
         assert_eq!(emu.v_reg[1], 0xC);
         assert_eq!(emu.pc, START_ADDR + 2);
@@ -817,6 +834,28 @@ mod tests {
 
         assert_eq!(emu.execute(0xE19E), Err(EmuError::InvalidKey { key: 0x10 }));
         assert_eq!(emu.execute(0xE1A1), Err(EmuError::InvalidKey { key: 0x10 }));
+    }
+
+    #[test]
+    fn invalid_keypress_index_is_reported() {
+        let mut emu = Emu::new();
+
+        assert_eq!(
+            emu.keypress(NUM_KEYS, true),
+            Err(EmuError::InvalidKeyIndex { index: NUM_KEYS })
+        );
+    }
+
+    #[test]
+    fn oversized_rom_is_reported() {
+        let mut emu = Emu::new();
+        let max = RAM_SIZE - START_ADDR as usize;
+        let rom = vec![0; max + 1];
+
+        assert_eq!(
+            emu.load(&rom),
+            Err(EmuError::RomTooLarge { len: max + 1, max })
+        );
     }
 
     #[test]

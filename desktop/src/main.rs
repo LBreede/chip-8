@@ -90,7 +90,7 @@ fn main() {
     let mut rom = File::open(&args[1]).expect("Unable to open file");
     let mut buffer = Vec::new();
     rom.read_to_end(&mut buffer).unwrap();
-    chip8.load(&buffer);
+    chip8.load(&buffer).expect("Unable to load ROM");
 
     let mut last = Instant::now();
     let mut cpu_acc = Duration::ZERO;
@@ -116,14 +116,20 @@ fn main() {
                     ..
                 } => {
                     if !repeat && let Some(k) = key2btn(key) {
-                        chip8.keypress(k, true);
+                        if let Err(err) = chip8.keypress(k, true) {
+                            eprintln!("Input error: {err}");
+                            break 'gameloop;
+                        }
                     }
                 }
                 Event::KeyUp {
                     keycode: Some(key), ..
                 } => {
                     if let Some(k) = key2btn(key) {
-                        chip8.keypress(k, false);
+                        if let Err(err) = chip8.keypress(k, false) {
+                            eprintln!("Input error: {err}");
+                            break 'gameloop;
+                        }
                     }
                 }
                 _ => (),
