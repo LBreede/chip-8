@@ -8,17 +8,28 @@ use sdl2::video::Window;
 use std::env;
 use std::fs::File;
 use std::io::Read;
+use std::time::{Duration, Instant};
 
-const SCALE: u32 = 15;
+const SCALE: u32 = 30;
 const WINDOW_WIDTH: u32 = (SCREEN_WIDTH as u32) * SCALE;
 const WINDOW_HEIGHT: u32 = (SCREEN_HEIGHT as u32) * SCALE;
-const TICKS_PER_FRAME: usize = 10;
+
+const CPU_HZ: f64 = 700.0;
+const TIMER_HZ: f64 = 60.0;
+
+fn cpu_step() -> Duration {
+    Duration::from_nanos((1_000_000_000.0 / CPU_HZ) as u64)
+}
+
+fn timer_step() -> Duration {
+    Duration::from_nanos((1_000_000_000.0 / TIMER_HZ) as u64)
+}
 
 fn draw_screen(emu: &Emu, canvas: &mut Canvas<Window>) {
     canvas.set_draw_color(Color::BLACK);
     canvas.clear();
     let screen_buf = emu.get_display();
-    canvas.set_draw_color(Color::WHITE);
+    canvas.set_draw_color(Color::GREEN);
     for (i, pixel) in screen_buf.iter().enumerate() {
         if *pixel {
             let x = (i % SCREEN_WIDTH) as u32;
@@ -58,33 +69,53 @@ fn main() {
         println!("Usage: cargo run path/to/game");
         return;
     }
+
     let sdl_context = sdl2::init().unwrap();
-    let video_subsystem = sdl_context.video().unwrap();
-    let window = video_subsystem
+    let video = sdl_context.video().unwrap();
+
+    let window = video
         .window("Chip-8 Emulator", WINDOW_WIDTH, WINDOW_HEIGHT)
         .position_centered()
         .opengl()
         .build()
         .unwrap();
+
     let mut canvas = window.into_canvas().present_vsync().build().unwrap();
-    canvas.clear();
-    canvas.present();
+    // canvas.clear();
+    // canvas.present();
+
     let mut event_pump = sdl_context.event_pump().unwrap();
+
     let mut chip8 = Emu::new();
     let mut rom = File::open(&args[1]).expect("Unable to open file");
     let mut buffer = Vec::new();
     rom.read_to_end(&mut buffer).unwrap();
     chip8.load(&buffer);
+
+    let mut last = Instant::now();
+    let mut cpu_acc = Duration::ZERO;
+    let mut timer_acc = Duration::ZERO;
+
+    let cpu_step = cpu_step();
+    let timer_step = timer_step();
+
     'gameloop: loop {
+        let now = Instant::now();
+        let dt = now - last;
+        last = now;
+
+        cpu_acc += dt;
+        timer_acc += dt;
+
         for event in event_pump.poll_iter() {
             match event {
-                Event::Quit { .. } => {
-                    break 'gameloop;
-                }
+                Event::Quit { .. } => break 'gameloop,
                 Event::KeyDown {
-                    keycode: Some(key), ..
+                    keycode: Some(key),
+                    repeat,
+                    ..
                 } => {
-                    if let Some(k) = key2btn(key) {
+                    if !repeat && let Some(k) = key2btn(key) {
                         chip8.keypress(k, true);
                     }
                 }
@@ -98,10 +129,15 @@ fn main() {
                 _ => (),
             }
         }
-        for _ in 0..TICKS_PER_FRAME {
+
+        while cpu_acc >= cpu_step {
             chip8.tick();
+            cpu_acc -= cpu_step;
         }
-        chip8.tick_timers();
+        while timer_acc >= timer_step {
+            chip8.tick_timers();
+            timer_acc -= timer_step;
+        }
         draw_screen(&chip8, &mut canvas);
     }
 }
